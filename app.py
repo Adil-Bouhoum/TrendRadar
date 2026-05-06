@@ -1,48 +1,605 @@
-import streamlit as st
-import pandas as pd
-import joblib
-from mastodon import Mastodon, StreamListener
-from extractor import MastodonExtractor
-from bs4 import BeautifulSoup
+import queue
 import time
+import pathlib
+import joblib
+import streamlit as st
+from datetime import datetime
 
-st.set_page_config(page_title="TrendRadar Live", layout="wide")
-st.title("🔥 TrendRadar : Détection de Viralité en Temps Réel")
+from extractor              import Extractor
+from normalizer             import PlatformNormalizer
+from feedback_queue         import FeedbackQueue
+from model_manager          import ModelManager
+from connectors.mastodon_connector import MastodonConnector
+from connectors.bluesky_connector  import BlueskyConnector
 
-# Chargement du modèle et du seuil (0.40)
+# ── PAGE CONFIG ───────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="TrendRadar",
+    page_icon="📡",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# ── CUSTOM CSS ────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500;600&display=swap');
+
+:root {
+    --bg-deep:    #090d12;
+    --bg-card:    #0f1520;
+    --bg-card2:   #141c2a;
+    --border:     #1e2d42;
+    --accent:     #00d4ff;
+    --accent2:    #7c3aed;
+    --green:      #00e676;
+    --yellow:     #ffb300;
+    --red:        #ff3d3d;
+    --text:       #e2eaf4;
+    --text-muted: #5a7a9a;
+    --font-mono:  'Space Mono', monospace;
+    --font-body:  'DM Sans', sans-serif;
+}
+html, body, [class*="css"] {
+    font-family: var(--font-body);
+    background-color: var(--bg-deep);
+    color: var(--text);
+}
+#MainMenu, footer, header { visibility: hidden; }
+.block-container { padding-top: 1.5rem; max-width: 1400px; }
+
+.radar-header {
+    display: flex; align-items: center; gap: 16px;
+    padding: 20px 0 12px 0;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 24px;
+}
+.radar-logo {
+    font-family: var(--font-mono); font-size: 28px; font-weight: 700;
+    color: var(--accent); letter-spacing: -1px;
+    text-shadow: 0 0 20px rgba(0,212,255,0.4);
+}
+.radar-tagline {
+    font-size: 13px; color: var(--text-muted);
+    letter-spacing: 2px; text-transform: uppercase;
+}
+.status-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--green); box-shadow: 0 0 8px var(--green);
+    animation: pulse 2s infinite; display: inline-block; margin-right: 6px;
+}
+.status-dot.off { background: var(--text-muted); box-shadow: none; animation: none; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+.metric-grid {
+    display: grid; grid-template-columns: repeat(4,1fr); gap: 12px; margin-bottom: 24px;
+}
+.metric-card {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px 20px; position: relative; overflow: hidden;
+}
+.metric-card::before {
+    content:''; position:absolute; top:0; left:0; right:0; height:2px;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+}
+.metric-label { font-size:11px; color:var(--text-muted); text-transform:uppercase;
+    letter-spacing:1.5px; margin-bottom:6px; font-family:var(--font-mono); }
+.metric-value { font-family:var(--font-mono); font-size:26px; font-weight:700;
+    color:var(--accent); line-height:1; }
+.metric-sub { font-size:11px; color:var(--text-muted); margin-top:4px; }
+
+.trend-card {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px 20px; margin-bottom: 10px;
+}
+.trend-card.high   { border-left: 3px solid var(--red); }
+.trend-card.medium { border-left: 3px solid var(--yellow); }
+.trend-card.low    { border-left: 3px solid var(--green); }
+.trend-keyword { font-family:var(--font-mono); font-size:18px; font-weight:700; color:var(--text); }
+.prob-badge { display:inline-block; padding:3px 10px; border-radius:20px;
+    font-family:var(--font-mono); font-size:13px; font-weight:700; }
+.prob-high   { background:rgba(255,61,61,0.15);  color:var(--red);    border:1px solid rgba(255,61,61,0.3); }
+.prob-medium { background:rgba(255,179,0,0.15);  color:var(--yellow); border:1px solid rgba(255,179,0,0.3); }
+.prob-low    { background:rgba(0,230,118,0.15);  color:var(--green);  border:1px solid rgba(0,230,118,0.3); }
+.feature-row { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
+.feature-pill {
+    background:var(--bg-card2); border:1px solid var(--border);
+    border-radius:6px; padding:4px 10px; font-size:11px;
+    font-family:var(--font-mono); color:var(--text-muted);
+}
+.feature-pill span { color:var(--accent); font-weight:700; }
+.trend-time { font-size:11px; color:var(--text-muted); font-family:var(--font-mono); }
+
+.feat-bar-track { background:var(--border); border-radius:4px; height:6px;
+    margin-bottom:10px; overflow:hidden; }
+.feat-bar-fill { height:100%; border-radius:4px;
+    background:linear-gradient(90deg,var(--accent),var(--accent2)); }
+
+.empty-state { text-align:center; padding:60px 20px; color:var(--text-muted); }
+.radar-ring {
+    width:80px; height:80px; border:2px solid var(--border); border-radius:50%;
+    margin:0 auto 16px; position:relative; animation:radar-spin 3s linear infinite;
+}
+.radar-ring::after {
+    content:''; position:absolute; top:50%; left:50%;
+    width:50%; height:2px; background:linear-gradient(90deg,transparent,var(--accent));
+    transform-origin:left center; transform:translateY(-50%);
+}
+@keyframes radar-spin { to { transform:rotate(360deg); } }
+
+section[data-testid="stSidebar"] {
+    background: var(--bg-card) !important;
+    border-right: 1px solid var(--border) !important;
+}
+.sidebar-section {
+    background:var(--bg-card); border:1px solid var(--border);
+    border-radius:8px; padding:14px; margin-bottom:12px;
+}
+.sidebar-title {
+    font-family:var(--font-mono); font-size:11px; color:var(--text-muted);
+    text-transform:uppercase; letter-spacing:1.5px; margin-bottom:10px;
+}
+.feat-bar-fill-sidebar { height:4px; border-radius:2px; margin-bottom:8px;
+    background:linear-gradient(90deg,var(--accent),var(--accent2)); }
+.log-line { font-family:var(--font-mono); font-size:11px; color:var(--text-muted);
+    padding:3px 0; border-bottom:1px solid rgba(30,45,66,0.5); }
+.log-line .ts { color:var(--accent); }
+.hr-glow { border:none; height:1px;
+    background:linear-gradient(90deg,transparent,var(--border),transparent); margin:20px 0; }
+.stButton > button {
+    background: linear-gradient(135deg,var(--accent),var(--accent2)) !important;
+    color:#000 !important; font-family:var(--font-mono) !important;
+    font-weight:700 !important; letter-spacing:1px !important;
+    border:none !important; border-radius:8px !important;
+    padding:10px 20px !important; font-size:13px !important;
+}
+.stButton > button:hover { opacity:0.85 !important; }
+</style>
+""", unsafe_allow_html=True)
+
+# ── CONFIG ────────────────────────────────────────────────────────────────────
+MY_ACCESS_TOKEN = st.secrets.get("MASTODON_TOKEN", "O5eirsaik7uWTuVvcZiSfWqo6tRH7OBfKYzf8x2JjdQ")
+MY_INSTANCE_URL = "https://mastodon.social"
+
+FEATURE_LABELS = {
+    "velocity"         : ("⚡ Velocity",   "Volume T15"),
+    "burst_score"      : ("🌊 Burst",       "Accélération"),
+    "max_authority_log": ("👑 Autorité",    "Max Authority"),
+    "organic_ratio"    : ("🌱 Organique",   "Diversité"),
+    "geo_score"        : ("🌍 Geo",         "Dispersion"),
+}
+FEATURE_IMPORTANCE = {
+    "velocity"         : 0.341,
+    "burst_score"      : 0.205,
+    "organic_ratio"    : 0.200,
+    "geo_score"        : 0.127,
+    "max_authority_log": 0.126,
+}
+
+# ── ASSETS ────────────────────────────────────────────────────────────────────
+APP_DIR = pathlib.Path(__file__).parent
+
 @st.cache_resource
-def load_assets():
-    model = joblib.load('trendradar_xgb_model.pkl')
-    cfg = joblib.load('trendradar_config.pkl')
-    return model, cfg
+def load_model_assets():
+    model_path      = APP_DIR / "trendradar_river_model.pkl"
+    normalizer_path = APP_DIR / "trendradar_normalizer.pkl"
 
-model, cfg = load_assets()
-extractor = MastodonExtractor()
+    model      = ModelManager.load(str(model_path)) if model_path.exists() else ModelManager()
+    normalizer = joblib.load(str(normalizer_path))  if normalizer_path.exists() else PlatformNormalizer()
+    return model, normalizer
 
-# Gestion du Stream
-class TrendListener(StreamListener):
-    def on_update(self, status):
-        content = BeautifulSoup(status['content'], "html.parser").get_text().lower()
-        now = time.time()
-        words = [w for w in content.split() if len(w) > 4 and w.isalpha()]
-        
-        for word in set(words):
-            extractor.add_event(word, now, 
-                                status['account']['followers_count'], 
-                                status['account']['acct'].split('@')[-1], 
-                                status['reblogs_count'])
-            
-            feats = extractor.get_features(word, now)
-            if feats and feats[0] > 5: # Seuil de vélocité minimal pour analyse
-                df_input = pd.DataFrame([feats], columns=cfg['features'])
-                proba = model.predict_proba(df_input)[0][1]
-                
-                if proba >= cfg['threshold']:
-                    st.toast(f"Tendance détectée : {word}", icon="🚨")
-                    # Logique d'affichage ici...
+def _build_connector(platform: str):
+    if platform == "Bluesky":
+        return BlueskyConnector()
+    return MastodonConnector(MY_ACCESS_TOKEN, MY_INSTANCE_URL)
 
-if st.button("Lancer le Scan Mastodon"):
-    st.info("Connexion au flux public...")
-    # Remplacez par votre token Mastodon
-    m = Mastodon(access_token="VOTRE_TOKEN", api_base_url='https://mastodon.social')
-    m.stream_public(TrendListener())
+model, normalizer = load_model_assets()
+
+# ── THREAD-SAFE EVENT QUEUE ───────────────────────────────────────────────────
+# Module-level queue persists across Streamlit reruns within a session.
+if "event_queue" not in st.session_state:
+    st.session_state["event_queue"] = queue.Queue(maxsize=2000)
+_event_queue: queue.Queue = st.session_state["event_queue"]
+
+# ── SESSION STATE ─────────────────────────────────────────────────────────────
+_defaults = {
+    "extractor"    : Extractor(),
+    "feedback"     : FeedbackQueue(delay=43200.0),
+    "trends_found" : [],
+    "stream_log"   : [],
+    "is_streaming" : False,
+    "total_scanned": 0,
+    "labeled_log"  : [],
+    "threshold"    : 0.40,
+    "platform"     : "Bluesky",
+    "connector"    : None,
+}
+for key, val in _defaults.items():
+    if key not in st.session_state:
+        st.session_state[key] = val
+
+# Build connector on first load or if it hasn't been created yet
+if st.session_state.connector is None:
+    st.session_state.connector = _build_connector(st.session_state.platform)
+
+# ── STREAM CALLBACK (runs in Mastodon background thread) ─────────────────────
+def _on_event(event: dict) -> None:
+    try:
+        _event_queue.put_nowait(event)
+    except queue.Full:
+        pass  # drop if UI is too slow to drain
+
+# ── PROCESS QUEUED EVENTS (main thread only) ──────────────────────────────────
+def process_events() -> None:
+    extractor  = st.session_state.extractor
+    feedback   = st.session_state.feedback
+    threshold  = st.session_state.threshold
+    now        = time.time()
+    batch_limit = 300
+
+    for _ in range(batch_limit):
+        try:
+            event = _event_queue.get_nowait()
+        except queue.Empty:
+            break
+
+        kw = event["keyword"]
+        st.session_state.total_scanned += 1
+        feedback.tick_volume(kw)
+
+        extractor.add_event(
+            kw,
+            event["timestamp"],
+            event["authority"],
+            event["community"],
+            event["is_reshare"],
+        )
+
+        raw_feats = extractor.get_features(kw, now)
+        if raw_feats is None or raw_feats["velocity"] <= 5:
+            continue
+
+        normalizer.update(raw_feats)
+        norm_feats = normalizer.normalize(raw_feats)
+        proba      = model.predict(norm_feats)
+
+        log_entry = {
+            "time" : datetime.now().strftime("%H:%M:%S"),
+            "word" : kw,
+            "proba": proba,
+            "feats": raw_feats,
+        }
+        st.session_state.stream_log.insert(0, log_entry)
+        st.session_state.stream_log = st.session_state.stream_log[:50]
+
+        if proba >= threshold:
+            existing = {t["keyword"] for t in st.session_state.trends_found}
+            if kw not in existing:
+                st.session_state.trends_found.insert(0, {
+                    "keyword": kw,
+                    "proba"  : proba,
+                    "time"   : datetime.now().strftime("%H:%M:%S"),
+                    "feats"  : raw_feats,
+                })
+                feedback.add_prediction(kw, raw_feats, norm_feats, proba)
+                st.toast(f"🚨 Trend détecté : #{kw}  {proba:.0%}", icon="🔥")
+
+    # ── Flush delayed labels ──────────────────────────────────────────────────
+    labeled = feedback.flush(model, normalizer)
+    if labeled:
+        st.session_state.labeled_log = (labeled + st.session_state.labeled_log)[:20]
+
+    # ── Periodic memory cleanup ───────────────────────────────────────────────
+    extractor.purge_old(now)
+
+# ── HELPERS ───────────────────────────────────────────────────────────────────
+def prob_class(p: float):
+    if p >= 0.75: return "high",   "prob-high"
+    if p >= 0.55: return "medium", "prob-medium"
+    return "low", "prob-low"
+
+# ── SIDEBAR ───────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("""
+    <div style="font-family:'Space Mono',monospace;font-size:20px;font-weight:700;
+                color:#00d4ff;margin-bottom:4px;">📡 TrendRadar</div>
+    <div style="font-size:11px;color:#5a7a9a;letter-spacing:2px;
+                text-transform:uppercase;margin-bottom:20px;">
+        Early Detection System
+    </div>""", unsafe_allow_html=True)
+
+    # ── Platform selector ──
+    st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-title">Source</div>', unsafe_allow_html=True)
+    selected_platform = st.radio(
+        "platform", ["Bluesky", "Mastodon"],
+        index=["Bluesky", "Mastodon"].index(st.session_state.platform),
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+    if selected_platform != st.session_state.platform:
+        if st.session_state.is_streaming:
+            st.session_state.connector.stop_stream()
+            st.session_state.is_streaming = False
+        st.session_state.platform  = selected_platform
+        st.session_state.connector = _build_connector(selected_platform)
+        st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # ── River model live stats ──
+    st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-title">Modèle River (Online)</div>', unsafe_allow_html=True)
+    for label, val, color in [
+        ("ROC-AUC (live)", f"{model.roc_auc:.3f}", "#00d4ff"),
+        ("Accuracy",       f"{model.accuracy:.1%}", "#00e676"),
+        ("Exemples appris",f"{model.n_learned:,}",  "#ffb300"),
+        ("Threshold",      f"{st.session_state.threshold:.0%}", "#7c3aed"),
+    ]:
+        st.markdown(f"""
+        <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+            <span style="font-size:12px;color:#5a7a9a;">{label}</span>
+            <span style="font-family:'Space Mono',monospace;font-size:12px;
+                         font-weight:700;color:{color};">{val}</span>
+        </div>""", unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # ── Feature importance ──
+    st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-title">Feature Importance</div>', unsafe_allow_html=True)
+    for feat, imp in sorted(FEATURE_IMPORTANCE.items(), key=lambda x: -x[1]):
+        label_str = FEATURE_LABELS[feat][0]
+        pct_w     = int(imp * 100)
+        st.markdown(f"""
+        <div style="display:flex;justify-content:space-between;margin-bottom:2px;">
+            <span style="font-size:11px;color:#e2eaf4;">{label_str}</span>
+            <span style="font-family:'Space Mono',monospace;font-size:11px;
+                         color:#00d4ff;">{imp:.1%}</span>
+        </div>
+        <div class="feat-bar-track">
+            <div class="feat-bar-fill" style="width:{pct_w}%;"></div>
+        </div>""", unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # ── Dataset info ──
+    st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-title">Données d\'entraînement</div>', unsafe_allow_html=True)
+    for label, val in [
+        ("COVID-19 Twitter",  "425"),
+        ("US Elections 2020", "1,018"),
+        ("Total hashtags",    "1,443"),
+        ("Labels en attente", str(st.session_state.feedback.pending_count)),
+    ]:
+        st.markdown(f"""
+        <div style="display:flex;justify-content:space-between;margin-bottom:5px;">
+            <span style="font-size:11px;color:#5a7a9a;">{label}</span>
+            <span style="font-family:'Space Mono',monospace;font-size:11px;
+                         color:#e2eaf4;">{val}</span>
+        </div>""", unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown(f"""
+    <div style="font-size:10px;color:#5a7a9a;text-align:center;
+                margin-top:16px;font-family:'Space Mono',monospace;">
+        Source : {st.session_state.platform}<br>
+        Fenêtre T15 · N≥3 · Seuil adaptatif
+    </div>""", unsafe_allow_html=True)
+
+# ── MAIN HEADER ───────────────────────────────────────────────────────────────
+is_on      = st.session_state.is_streaming
+dot_class  = "status-dot" if is_on else "status-dot off"
+status_txt = "LIVE" if is_on else "OFFLINE"
+
+st.markdown(f"""
+<div class="radar-header">
+    <div>
+        <div class="radar-logo">TrendRadar</div>
+        <div class="radar-tagline">Viral Signal Detection · {st.session_state.platform}</div>
+    </div>
+    <div style="margin-left:auto;display:flex;align-items:center;gap:8px;">
+        <span class="{dot_class}"></span>
+        <span style="font-family:'Space Mono',monospace;font-size:13px;
+                     color:{'#00e676' if is_on else '#5a7a9a'};">{status_txt}</span>
+    </div>
+</div>""", unsafe_allow_html=True)
+
+# ── METRIC CARDS ──────────────────────────────────────────────────────────────
+n_trends  = len(st.session_state.trends_found)
+n_scanned = st.session_state.total_scanned
+n_log     = len(st.session_state.stream_log)
+top_prob  = max((t["proba"] for t in st.session_state.trends_found), default=0.0)
+
+st.markdown(f"""
+<div class="metric-grid">
+    <div class="metric-card">
+        <div class="metric-label">Trends Détectés</div>
+        <div class="metric-value">{n_trends}</div>
+        <div class="metric-sub">P(viral) ≥ seuil</div>
+    </div>
+    <div class="metric-card">
+        <div class="metric-label">Posts Analysés</div>
+        <div class="metric-value">{n_scanned:,}</div>
+        <div class="metric-sub">Flux Mastodon</div>
+    </div>
+    <div class="metric-card">
+        <div class="metric-label">Mots Scorés</div>
+        <div class="metric-value">{n_log}</div>
+        <div class="metric-sub">Vélocité ≥ 5</div>
+    </div>
+    <div class="metric-card">
+        <div class="metric-label">Probabilité Max</div>
+        <div class="metric-value">{top_prob:.0%}</div>
+        <div class="metric-sub">Top trend actuel</div>
+    </div>
+</div>""", unsafe_allow_html=True)
+
+# ── CONTROL + CONTENT ─────────────────────────────────────────────────────────
+ctrl_col, feed_col, log_col = st.columns([1.2, 2.5, 1.5])
+
+# ── Control Panel ──────────────────────────────────────────────────────────────
+with ctrl_col:
+    st.markdown("""
+    <div style="font-family:'Space Mono',monospace;font-size:11px;
+                color:#5a7a9a;text-transform:uppercase;letter-spacing:1.5px;
+                margin-bottom:12px;">Contrôle</div>""", unsafe_allow_html=True)
+
+    if not st.session_state.is_streaming:
+        if st.button("🚀 Lancer le Scan", use_container_width=True):
+            try:
+                st.session_state.connector.start_stream(_on_event)
+                st.session_state.is_streaming = True
+                st.rerun()
+            except Exception as e:
+                st.error(f"Erreur connexion : {e}")
+    else:
+        if st.button("⏹ Arrêter", use_container_width=True):
+            st.session_state.connector.stop_stream()
+            st.session_state.is_streaming = False
+            st.rerun()
+
+    st.markdown('<div class="hr-glow"></div>', unsafe_allow_html=True)
+
+    st.markdown("""
+    <div style="font-family:'Space Mono',monospace;font-size:11px;
+                color:#5a7a9a;text-transform:uppercase;letter-spacing:1.5px;
+                margin-bottom:8px;">Threshold</div>""", unsafe_allow_html=True)
+
+    threshold = st.slider(
+        "P(viral) minimum", 0.20, 0.80,
+        st.session_state.threshold, 0.05,
+        label_visibility="collapsed",
+    )
+    st.session_state.threshold = threshold
+    st.markdown(f"""
+    <div style="font-family:'Space Mono',monospace;font-size:20px;font-weight:700;
+                color:#00d4ff;text-align:center;margin:4px 0 16px 0;">{threshold:.0%}</div>
+    """, unsafe_allow_html=True)
+
+    st.markdown('<div class="hr-glow"></div>', unsafe_allow_html=True)
+
+    if st.button("🗑 Effacer les résultats", use_container_width=True):
+        st.session_state.trends_found   = []
+        st.session_state.stream_log     = []
+        st.session_state.total_scanned  = 0
+        st.session_state.labeled_log    = []
+        st.session_state.extractor      = Extractor()
+        while not _event_queue.empty():
+            try: _event_queue.get_nowait()
+            except queue.Empty: break
+        st.rerun()
+
+    st.markdown("""
+    <div style="background:#0f1520;border:1px solid #1e2d42;border-radius:8px;
+                padding:12px;margin-top:16px;font-size:11px;color:#5a7a9a;
+                font-family:'Space Mono',monospace;line-height:1.8;">
+        <div style="color:#00d4ff;margin-bottom:6px;">HOW IT WORKS</div>
+        ① Écoute le flux Mastodon<br>
+        ② Normalise les features (P75)<br>
+        ③ River prédit P(viral)<br>
+        ④ À T+12h → label → learn()
+    </div>""", unsafe_allow_html=True)
+
+# ── Trend Feed ────────────────────────────────────────────────────────────────
+with feed_col:
+    st.markdown("""
+    <div style="font-family:'Space Mono',monospace;font-size:11px;
+                color:#5a7a9a;text-transform:uppercase;letter-spacing:1.5px;
+                margin-bottom:12px;">Tendances Détectées</div>""", unsafe_allow_html=True)
+
+    if not st.session_state.trends_found:
+        st.markdown("""
+        <div class="empty-state">
+            <div class="radar-ring"></div>
+            <div style="font-family:'Space Mono',monospace;font-size:13px;
+                        color:#5a7a9a;margin-bottom:8px;">SCANNING...</div>
+            <div style="font-size:12px;color:#2a4060;">
+                Lance le scan pour détecter les tendances virales
+            </div>
+        </div>""", unsafe_allow_html=True)
+    else:
+        for trend in st.session_state.trends_found[:10]:
+            p               = trend["proba"]
+            card_cls, badge_cls = prob_class(p)
+            feats           = trend.get("feats", {})
+            bar_color       = "var(--red)" if p >= 0.75 else "var(--yellow)" if p >= 0.55 else "var(--green)"
+            bar_pct         = int(p * 100)
+
+            feat_pills = "".join(
+                f'<div class="feature-pill">{FEATURE_LABELS.get(k, (k,""))[0]} '
+                f'<span>{v:.2f}</span></div>'
+                for k, v in feats.items()
+            )
+            st.markdown(f"""
+            <div class="trend-card {card_cls}">
+                <div style="display:flex;align-items:center;justify-content:space-between;
+                            margin-bottom:10px;">
+                    <div class="trend-keyword">#{trend['keyword']}</div>
+                    <div style="display:flex;align-items:center;gap:10px;">
+                        <span class="prob-badge {badge_cls}">{p:.1%}</span>
+                        <span class="trend-time">{trend['time']}</span>
+                    </div>
+                </div>
+                <div class="feat-bar-track">
+                    <div style="height:100%;width:{bar_pct}%;border-radius:4px;
+                                background:{bar_color};"></div>
+                </div>
+                <div class="feature-row">{feat_pills}</div>
+            </div>""", unsafe_allow_html=True)
+
+# ── Stream Log ────────────────────────────────────────────────────────────────
+with log_col:
+    st.markdown("""
+    <div style="font-family:'Space Mono',monospace;font-size:11px;
+                color:#5a7a9a;text-transform:uppercase;letter-spacing:1.5px;
+                margin-bottom:12px;">Log du Stream</div>""", unsafe_allow_html=True)
+
+    if not st.session_state.stream_log:
+        st.markdown("""
+        <div style="font-family:'Space Mono',monospace;font-size:11px;
+                    color:#2a4060;padding:20px 0;text-align:center;">
+            Aucun signal reçu
+        </div>""", unsafe_allow_html=True)
+    else:
+        log_html = ""
+        threshold = st.session_state.threshold
+        for entry in st.session_state.stream_log[:20]:
+            p        = entry["proba"]
+            kw_color = "#ff3d3d" if p >= 0.75 else "#ffb300" if p >= 0.55 else "#e2eaf4"
+            flag     = " 🔥" if p >= threshold else ""
+            log_html += f"""
+            <div class="log-line">
+                <span class="ts">{entry['time']}</span>
+                <span style="color:#2a4060;"> ▸ </span>
+                <span style="color:{kw_color};">{entry['word']}{flag}</span>
+                <span style="color:#2a4060;float:right;font-size:10px;">{p:.0%}</span>
+            </div>"""
+        st.markdown(f"""
+        <div style="background:#0f1520;border:1px solid #1e2d42;border-radius:8px;
+                    padding:10px 12px;max-height:500px;overflow-y:auto;">
+            {log_html}
+        </div>""", unsafe_allow_html=True)
+
+    # ── Labeled log (online learning feedback) ────────────────────────────────
+    if st.session_state.labeled_log:
+        st.markdown("""
+        <div style="font-family:'Space Mono',monospace;font-size:11px;
+                    color:#5a7a9a;text-transform:uppercase;letter-spacing:1.5px;
+                    margin-top:16px;margin-bottom:8px;">Labels reçus (T+12h)</div>
+        """, unsafe_allow_html=True)
+        for rec in st.session_state.labeled_log[:5]:
+            color = "#00e676" if rec["label"] == 1 else "#5a7a9a"
+            badge = "VIRAL" if rec["label"] == 1 else "NON-VIRAL"
+            st.markdown(f"""
+            <div class="log-line">
+                <span style="color:{color};font-weight:700;">{badge}</span>
+                <span style="color:#2a4060;"> ▸ </span>
+                <span style="color:#e2eaf4;">#{rec['keyword']}</span>
+                <span style="color:#2a4060;float:right;font-size:10px;">
+                    vol:{rec['volume']:.0f} thr:{rec['threshold']:.0f}
+                </span>
+            </div>""", unsafe_allow_html=True)
+
+# ── Auto-refresh while streaming ──────────────────────────────────────────────
+if st.session_state.is_streaming:
+    process_events()
+    time.sleep(2)
+    st.rerun()
