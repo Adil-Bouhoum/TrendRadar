@@ -56,11 +56,12 @@ class BlueskyConnector(BaseConnector):
 
         return [
             {
-                "keyword"   : word,
-                "timestamp" : now,
-                "authority" : 1,       # firehose doesn't expose follower counts
-                "community" : did,     # unique DID per author → accurate diversity
-                "is_reshare": is_reply,
+                "keyword"      : word,
+                "timestamp"    : now,
+                "authority"    : 1,       # firehose doesn't expose follower counts
+                "community"    : did,     # unique DID per author → accurate diversity
+                "is_reshare"   : is_reply,
+                "source_author": None,    # reply source DID not in Jetstream payload
             }
             for word in set(words)
         ]

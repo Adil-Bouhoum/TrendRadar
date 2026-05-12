@@ -25,17 +25,19 @@ class MastodonConnector(BaseConnector):
         text    = BeautifulSoup(raw["content"], "html.parser").get_text().lower()
         words   = [w for w in text.split() if len(w) > 4 and w.isalpha()]
         now     = time.time()
-        authority  = raw["account"]["followers_count"]
-        community  = raw["account"]["acct"].split("@")[-1] or "mastodon.social"
-        is_reshare = raw.get("reblogs_count", 0) > 0
+        authority     = raw["account"]["followers_count"]
+        community     = raw["account"]["acct"].split("@")[-1] or "mastodon.social"
+        is_reshare    = raw.get("reblog") is not None
+        source_author = raw["reblog"]["account"]["acct"] if is_reshare else None
 
         return [
             {
-                "keyword"   : word,
-                "timestamp" : now,
-                "authority" : authority,
-                "community" : community,
-                "is_reshare": is_reshare,
+                "keyword"      : word,
+                "timestamp"    : now,
+                "authority"    : authority,
+                "community"    : community,
+                "is_reshare"   : is_reshare,
+                "source_author": source_author,
             }
             for word in set(words)
         ]

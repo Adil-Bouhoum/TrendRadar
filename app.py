@@ -3,6 +3,8 @@ import time
 import pathlib
 import joblib
 import streamlit as st
+import networkx as nx
+import plotly.graph_objects as go
 from datetime import datetime
 
 from extractor              import Extractor
@@ -158,22 +160,24 @@ section[data-testid="stSidebar"] {
 """, unsafe_allow_html=True)
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
-MY_ACCESS_TOKEN = st.secrets.get("MASTODON_TOKEN", "O5eirsaik7uWTuVvcZiSfWqo6tRH7OBfKYzf8x2JjdQ")
+MY_ACCESS_TOKEN = st.secrets.get("MASTODON_TOKEN", "")
 MY_INSTANCE_URL = "https://mastodon.social"
 
 FEATURE_LABELS = {
-    "velocity"         : ("⚡ Velocity",   "Volume T15"),
-    "burst_score"      : ("🌊 Burst",       "Accélération"),
-    "max_authority_log": ("👑 Autorité",    "Max Authority"),
-    "organic_ratio"    : ("🌱 Organique",   "Diversité"),
-    "geo_score"        : ("🌍 Geo",         "Dispersion"),
+    "velocity"         : ("⚡ Velocity",    "Volume T15"),
+    "burst_score"      : ("🌊 Burst",        "Accélération"),
+    "max_authority_log": ("👑 Autorité",     "Max Authority"),
+    "organic_ratio"    : ("🌱 Organique",    "Diversité"),
+    "geo_score"        : ("🌍 Geo",          "Dispersion"),
+    "max_pagerank"     : ("🕸 PageRank",     "Influenceur max"),
 }
 FEATURE_IMPORTANCE = {
-    "velocity"         : 0.341,
-    "burst_score"      : 0.205,
-    "organic_ratio"    : 0.200,
-    "geo_score"        : 0.127,
-    "max_authority_log": 0.126,
+    "velocity"         : 0.320,
+    "burst_score"      : 0.192,
+    "organic_ratio"    : 0.188,
+    "geo_score"        : 0.119,
+    "max_authority_log": 0.118,
+    "max_pagerank"     : 0.063,
 }
 
 # ── ASSETS ────────────────────────────────────────────────────────────────────
@@ -253,6 +257,7 @@ def process_events() -> None:
             event["authority"],
             event["community"],
             event["is_reshare"],
+            event.get("source_author"),
         )
 
         raw_feats = extractor.get_features(kw, now)
@@ -297,6 +302,91 @@ def prob_class(p: float):
     if p >= 0.75: return "high",   "prob-high"
     if p >= 0.55: return "medium", "prob-medium"
     return "low", "prob-low"
+
+def _bfs_layers(reshare_graph: dict, max_depth: int = 5,
+                max_per_layer: int = 8) -> list[list[str]]:
+    """
+    BFS over the reshare graph starting from the original authors (roots).
+    Returns a list of layers: layer[0] = original authors,
+    layer[1] = first wave of resharers, etc.
+    """
+    if not reshare_graph:
+        return []
+    # Reverse graph: source -> [resharers]
+    reverse: dict[str, list[str]] = {}
+    for resharer, sources in reshare_graph.items():
+        for source in sources:
+            reverse.setdefault(source, []).append(resharer)
+    all_sources   = set(reverse.keys())
+    all_resharers = set(reshare_graph.keys())
+    roots = sorted(all_sources - all_resharers,
+                   key=lambda n: -len(reverse.get(n, [])))[:max_per_layer]
+    if not roots:
+        roots = sorted(all_sources,
+                       key=lambda n: -len(reverse.get(n, [])))[:max_per_layer]
+    visited = set(roots)
+    layers  = [list(roots)]
+    for _ in range(max_depth - 1):
+        next_layer: list[str] = []
+        for node in layers[-1]:
+            for neighbor in reverse.get(node, []):
+                if neighbor not in visited:
+                    next_layer.append(neighbor)
+                    visited.add(neighbor)
+        if not next_layer:
+            break
+        layers.append(next_layer[:max_per_layer])
+    return layers
+
+def _plot_reshare_graph(reshare_graph: dict, keyword: str):
+    """Returns a Plotly figure of the reshare network, or None if empty."""
+    if not reshare_graph:
+        return None
+    G = nx.DiGraph()
+    for resharer, sources in reshare_graph.items():
+        for source in sources:
+            G.add_edge(resharer, source)
+    if G.number_of_nodes() < 2:
+        return None
+    try:
+        pos = nx.spring_layout(G, seed=42, k=1.2)
+        pr  = nx.pagerank(G, alpha=0.85)
+    except Exception:
+        return None
+    edge_x, edge_y = [], []
+    for u, v in G.edges():
+        x0, y0 = pos[u]; x1, y1 = pos[v]
+        edge_x += [x0, x1, None]; edge_y += [y0, y1, None]
+    edge_trace = go.Scatter(x=edge_x, y=edge_y, mode="lines",
+                            line=dict(width=1, color="#1e2d42"), hoverinfo="none")
+    node_x    = [pos[n][0] for n in G.nodes()]
+    node_y    = [pos[n][1] for n in G.nodes()]
+    node_size = [14 + int(pr[n] * 160) for n in G.nodes()]
+    node_clr  = [pr[n] for n in G.nodes()]
+    node_lbl  = [n[:18] + ("…" if len(n) > 18 else "") for n in G.nodes()]
+    node_trace = go.Scatter(
+        x=node_x, y=node_y, mode="markers+text",
+        text=node_lbl, textposition="top center",
+        hovertext=[f"{n}<br>PageRank: {pr[n]:.3f}" for n in G.nodes()],
+        hoverinfo="text",
+        marker=dict(size=node_size, color=node_clr,
+                    colorscale=[[0, "#0f1520"], [0.5, "#7c3aed"], [1, "#00d4ff"]],
+                    showscale=False,
+                    line=dict(width=1, color="#1e2d42")),
+        textfont=dict(size=9, color="#5a7a9a"),
+    )
+    return go.Figure(
+        data=[edge_trace, node_trace],
+        layout=go.Layout(
+            paper_bgcolor="#090d12", plot_bgcolor="#090d12",
+            showlegend=False, height=340,
+            margin=dict(l=10, r=10, t=30, b=10),
+            title=dict(text=f"Graphe de propagation — #{keyword}",
+                       font=dict(color="#e2eaf4", size=12, family="Space Mono")),
+            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        )
+    )
 
 # ── SIDEBAR ───────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -389,6 +479,8 @@ is_on      = st.session_state.is_streaming
 dot_class  = "status-dot" if is_on else "status-dot off"
 status_txt = "LIVE" if is_on else "OFFLINE"
 
+_p75 = normalizer.dynamic_threshold()
+
 st.markdown(f"""
 <div class="radar-header">
     <div>
@@ -400,30 +492,46 @@ st.markdown(f"""
         <span style="font-family:'Space Mono',monospace;font-size:13px;
                      color:{'#00e676' if is_on else '#5a7a9a'};">{status_txt}</span>
     </div>
+</div>
+<div style="font-size:12px;color:#5a7a9a;margin-bottom:18px;padding:8px 12px;
+            background:#0f1520;border-left:3px solid #1e2d42;border-radius:4px;">
+    Le modèle prédit, pour chaque mot-clé actif, la probabilité qu'il devienne viral
+    dans les 12&nbsp;prochaines heures
+    &nbsp;·&nbsp; Seuil dynamique&nbsp;: <span style="color:#00d4ff;font-family:'Space Mono',monospace;">P75 = {_p75:.0f} posts</span>
+    &nbsp;·&nbsp; Threshold&nbsp;: <span style="color:#7c3aed;font-family:'Space Mono',monospace;">P(viral) ≥ {st.session_state.threshold:.0%}</span>
 </div>""", unsafe_allow_html=True)
 
 # ── METRIC CARDS ──────────────────────────────────────────────────────────────
 n_trends  = len(st.session_state.trends_found)
 n_scanned = st.session_state.total_scanned
-n_log     = len(st.session_state.stream_log)
 top_prob  = max((t["proba"] for t in st.session_state.trends_found), default=0.0)
+
+_labeled   = st.session_state.labeled_log
+_n_labeled = len(_labeled)
+if _n_labeled > 0:
+    _n_correct  = sum(1 for r in _labeled if r["label"] == 1)
+    _precision  = f"{_n_correct / _n_labeled:.0%}"
+    _prec_sub   = f"sur {_n_labeled} label{'s' if _n_labeled > 1 else ''}"
+else:
+    _precision = "—"
+    _prec_sub  = "en attente de T+12h"
 
 st.markdown(f"""
 <div class="metric-grid">
     <div class="metric-card">
-        <div class="metric-label">Trends Détectés</div>
+        <div class="metric-label">Prédictions Virales</div>
         <div class="metric-value">{n_trends}</div>
         <div class="metric-sub">P(viral) ≥ seuil</div>
     </div>
     <div class="metric-card">
         <div class="metric-label">Posts Analysés</div>
         <div class="metric-value">{n_scanned:,}</div>
-        <div class="metric-sub">Flux Mastodon</div>
+        <div class="metric-sub">Flux {st.session_state.platform}</div>
     </div>
     <div class="metric-card">
-        <div class="metric-label">Mots Scorés</div>
-        <div class="metric-value">{n_log}</div>
-        <div class="metric-sub">Vélocité ≥ 5</div>
+        <div class="metric-label">Précision Récente</div>
+        <div class="metric-value">{_precision}</div>
+        <div class="metric-sub">{_prec_sub}</div>
     </div>
     <div class="metric-card">
         <div class="metric-label">Probabilité Max</div>
@@ -503,7 +611,7 @@ with feed_col:
     st.markdown("""
     <div style="font-family:'Space Mono',monospace;font-size:11px;
                 color:#5a7a9a;text-transform:uppercase;letter-spacing:1.5px;
-                margin-bottom:12px;">Tendances Détectées</div>""", unsafe_allow_html=True)
+                margin-bottom:12px;">Prédictions de Viralité (T+12h)</div>""", unsafe_allow_html=True)
 
     if not st.session_state.trends_found:
         st.markdown("""
@@ -597,6 +705,74 @@ with log_col:
                     vol:{rec['volume']:.0f} thr:{rec['threshold']:.0f}
                 </span>
             </div>""", unsafe_allow_html=True)
+
+# ── BFS Propagation Explorer ──────────────────────────────────────────────────
+if st.session_state.trends_found:
+    st.markdown('<div class="hr-glow"></div>', unsafe_allow_html=True)
+    st.markdown("""
+    <div style="font-family:'Space Mono',monospace;font-size:11px;
+                color:#5a7a9a;text-transform:uppercase;letter-spacing:1.5px;
+                margin-bottom:4px;">🕸 Propagation Explorer (BFS)</div>
+    <div style="font-size:11px;color:#2a4060;margin-bottom:12px;">
+        Graphe de repartage du mot-clé sélectionné — nœuds colorés par PageRank
+    </div>""", unsafe_allow_html=True)
+
+    kw_options = [t["keyword"] for t in st.session_state.trends_found[:10]]
+    selected_bfs = st.selectbox(
+        "Choisir un trend", kw_options, label_visibility="collapsed", key="bfs_kw"
+    )
+
+    if selected_bfs:
+        graph = st.session_state.extractor.get_reshare_graph(selected_bfs)
+        if not graph:
+            st.markdown("""
+            <div style="font-family:'Space Mono',monospace;font-size:11px;
+                        color:#2a4060;padding:12px 0;">
+                Aucune donnée de repartage capturée pour ce mot-clé.<br>
+                (Mastodon expose les reblogs — Bluesky nécessite un cache d'auteurs)
+            </div>""", unsafe_allow_html=True)
+        else:
+            bfs_col, graph_col = st.columns([1, 2])
+            with bfs_col:
+                layers = _bfs_layers(graph)
+                layer_labels = ["Auteurs originaux", "1er relai", "2e relai",
+                                "3e relai", "4e relai"]
+                for i, layer in enumerate(layers):
+                    label = layer_labels[i] if i < len(layer_labels) else f"Relai {i}"
+                    color = ["#00d4ff", "#7c3aed", "#ffb300", "#00e676", "#ff3d3d"][i % 5]
+                    nodes_html = " ".join(
+                        f'<span style="background:#0f1520;border:1px solid {color}33;'
+                        f'border-radius:4px;padding:2px 6px;font-size:10px;color:{color};'
+                        f'font-family:Space Mono,monospace;">{n[:20]}</span>'
+                        for n in layer
+                    )
+                    st.markdown(f"""
+                    <div style="margin-bottom:10px;">
+                        <div style="font-size:10px;color:#5a7a9a;
+                                    font-family:Space Mono,monospace;
+                                    margin-bottom:4px;">
+                            {label} ({len(layer)} nœuds)
+                        </div>
+                        <div style="display:flex;flex-wrap:wrap;gap:4px;">
+                            {nodes_html}
+                        </div>
+                    </div>""", unsafe_allow_html=True)
+                total_nodes = sum(len(l) for l in layers)
+                st.markdown(f"""
+                <div style="font-size:10px;color:#5a7a9a;font-family:'Space Mono',monospace;
+                            margin-top:8px;border-top:1px solid #1e2d42;padding-top:8px;">
+                    {total_nodes} nœuds · {len(layers)} couches BFS
+                </div>""", unsafe_allow_html=True)
+            with graph_col:
+                fig = _plot_reshare_graph(graph, selected_bfs)
+                if fig:
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.markdown("""
+                    <div style="font-family:'Space Mono',monospace;font-size:11px;
+                                color:#2a4060;padding:20px;text-align:center;">
+                        Graphe trop petit pour visualiser (min. 2 nœuds)
+                    </div>""", unsafe_allow_html=True)
 
 # ── Auto-refresh while streaming ──────────────────────────────────────────────
 if st.session_state.is_streaming:

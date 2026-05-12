@@ -31,6 +31,9 @@ COL_MAP = {"max_followers_log": "max_authority_log"}
 FEATURES = ["velocity", "burst_score", "max_authority_log", "organic_ratio", "geo_score"]
 LABEL_COL = "Y"
 
+# max_pagerank is always 0 for historical data (no reshare graph available)
+PAGERANK_DEFAULT = {"max_pagerank": 0.0}
+
 # ── Load & merge ──────────────────────────────────────────────────────────────
 frames = []
 for name, path in FILES.items():
@@ -55,7 +58,7 @@ print(f"\nTotal: {len(data)} examples  |  viral rate: {data[LABEL_COL].mean():.1
 # ── Warm up normalizer first pass (build distribution) ────────────────────────
 normalizer = PlatformNormalizer(window_size=len(data) + 500)
 for _, row in data.iterrows():
-    raw = row[FEATURES].to_dict()
+    raw = {**row[FEATURES].to_dict(), **PAGERANK_DEFAULT}
     normalizer.update(raw)
 
 # Seed volume history so dynamic threshold is calibrated from the start
@@ -67,7 +70,7 @@ for _, row in data.iterrows():
 model = ModelManager()
 
 for i, (_, row) in enumerate(data.iterrows()):
-    raw   = row[FEATURES].to_dict()
+    raw   = {**row[FEATURES].to_dict(), **PAGERANK_DEFAULT}
     norm  = normalizer.normalize(raw)
     label = int(row[LABEL_COL])
     model.learn(norm, label)
