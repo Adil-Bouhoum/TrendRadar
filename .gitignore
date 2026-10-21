@@ -1,8 +1,19 @@
-venv/
+# Python
 __pycache__/
 *.pyc
+venv/
+.venv/
+.ipynb_checkpoints/
+
+# Secrets (copy .streamlit/secrets.toml.example to .streamlit/secrets.toml)
 .env
 .streamlit/secrets.toml
-trendradar_xgb_model.pkl
-trendradar_config.pkl
+
+# Local scratch
 test_key.py
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
