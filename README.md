@@ -141,7 +141,7 @@ TrendRadar/
 
 ## Team & role
 
-EMSI course project (May 2026), team of four: **Adil Bouhoum**, Achraf Abderazik, Ilias Ait Barrehil, Marouane El Mahlali.
+EMSI course project (May 2026), team of four: **Adil Bouhoum**, Achraf Abderrazik, Ilias Ait Barrehil, Marouane El Mahlali.
 
 **My role:** I led the implementation and the architecture of the system.
 
