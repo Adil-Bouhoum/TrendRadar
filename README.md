@@ -79,7 +79,7 @@ Feature importance (XGBoost, five offline features):
 
 Online model: River ARF, **prequential ROC-AUC 0.830** after 1,443 examples (`warm_up_model.py`). Prequential means each example is predicted first and learned right after, so the score covers the model's whole learning curve, including its early mistakes. **It is not directly comparable to the 0.921 above**, which comes from a model trained once and evaluated on a held-out test set.
 
-> The feature-importance panel in the dashboard sidebar is **hard-coded** in `app.py`. Its `max_pagerank` value (6.3%) is a placeholder, not a measured importance: `max_pagerank` didn't exist in the historical data.
+> The feature-importance panel in the dashboard sidebar is **hard-coded** in `app.py`. Its `max_pagerank` bar is a placeholder, not a measured importance: `max_pagerank` didn't exist in the historical data.
 
 ## Tech stack
 
