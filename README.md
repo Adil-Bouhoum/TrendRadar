@@ -149,4 +149,4 @@ EMSI course project (May 2026), team of four: **Adil Bouhoum**, Achraf Abderazik
 
 **Adil Bouhoum** · AI & Data Science engineering student, EMSI
 
-[Portfolio](PORTFOLIO_URL) · [LinkedIn](LINKEDIN_URL) · [GitHub](https://github.com/Adil-Bouhoum)
+[LinkedIn](https://www.linkedin.com/in/adil-bouhoum-b83129232) · [GitHub](https://github.com/Adil-Bouhoum)
